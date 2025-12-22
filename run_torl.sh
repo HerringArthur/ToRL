@@ -16,13 +16,13 @@ export TOKENIZERS_PARALLELISM=false
 # ----------------------------------------------------------------
 # 基础模型路径 (可以是 HuggingFace ID 或 本地绝对路径)
 # 建议尝试: "Qwen/Qwen2.5-7B-Instruct" 或 "Qwen/Qwen2.5-1.5B-Instruct" (显存更小)
-MODEL_PATH="/seu_share2/home/fenglei/sharedata/Qwen2.5-7B-Instruct"
+MODEL_PATH="/seu_share2/home/fenglei/sharedata/Qwen2.5-1.5B-Instruct"
 
 # 数据集路径
-DATA_PATH="./data/train_ticket_data.json"
+DATA_PATH="/seu_share2/home/fenglei/213243847/data/grpo-aco/data/rl_dataset_llm_v2.json"
 
 # 输出保存路径
-OUTPUT_DIR="./checkpoints_torl_v1"
+OUTPUT_DIR="./output/checkpoints_verl_v1"
 
 # 3. 核心超参数配置 (根据显存大小调整)
 # ----------------------------------------------------------------

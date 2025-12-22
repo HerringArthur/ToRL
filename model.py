@@ -63,6 +63,19 @@ class TrainTicketPolicyModel(nn.Module):
             torch_dtype=torch.bfloat16 if cfg.use_amp else torch.float16,
             device_map=device_map
         )
+
+        self.base_model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+
+        # 修复警告 2: 强制输入层需要梯度
+        # 这对于 LoRA + Gradient Checkpointing 是必须的，否则梯度链会断开
+        if hasattr(self.base_model, "enable_input_require_grads"):
+            self.base_model.enable_input_require_grads()
+        else:
+            def make_inputs_require_grad(module, input, output):
+                output.requires_grad_(True)
+            self.base_model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
         
         # 如果使用了量化，需要预处理模型以支持训练
         if quantization_config:
