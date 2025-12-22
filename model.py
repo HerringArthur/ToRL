@@ -42,8 +42,6 @@ class TrainTicketPolicyModel(nn.Module):
         quantization_config = None
         if HAS_BNB and self.device == "cuda":
             # 这里简单判断：如果不是全精度模式或者显式要求量化，可以开启
-            # 在本例中，我们默认根据是否有 BNB 库来决定是否尝试量化加载
-            # 你也可以在 cfg 中增加一个 use_4bit 字段来控制
             print("[Model] Enabling 4-bit NF4 quantization...")
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -64,11 +62,22 @@ class TrainTicketPolicyModel(nn.Module):
             device_map=device_map
         )
 
+        # =================================================================
+        # [关键修改] 4. 初始化顺序调整
+        # =================================================================
+        
+        # (A) 先进行量化预处理 (必须在开启 gradient checkpointing 之前)
+        # 这一步会处理模型的层结构 (Wrapping)，如果在后面调用会覆盖掉之前的梯度设置
+        if quantization_config:
+            self.base_model = prepare_model_for_kbit_training(self.base_model)
+
+        # (B) 开启梯度检查点 (Gradient Checkpointing)
+        # use_reentrant=False 修复了 UserWarning
         self.base_model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
 
-        # 修复警告 2: 强制输入层需要梯度
+        # (C) 强制输入层需要梯度 (必须在 Checkpointing 之后确保生效)
         # 这对于 LoRA + Gradient Checkpointing 是必须的，否则梯度链会断开
         if hasattr(self.base_model, "enable_input_require_grads"):
             self.base_model.enable_input_require_grads()
@@ -77,12 +86,8 @@ class TrainTicketPolicyModel(nn.Module):
                 output.requires_grad_(True)
             self.base_model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
         
-        # 如果使用了量化，需要预处理模型以支持训练
-        if quantization_config:
-            self.base_model = prepare_model_for_kbit_training(self.base_model)
-
         # =================================================================
-        # 4. 配置 LoRA (PEFT)
+        # 5. 配置 LoRA (PEFT)
         # =================================================================
         if cfg.use_lora:
             print(f"[Model] Applying LoRA (r={cfg.lora_r}, alpha={cfg.lora_alpha})...")
