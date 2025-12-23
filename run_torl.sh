@@ -6,6 +6,8 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
+#SBATCH --time=196:00:00
+#SBATCH --partition=fengl2
 
 mkdir -p logs
 set -euo pipefail
