@@ -13,7 +13,7 @@ mkdir -p logs
 set -euo pipefail
 
 module purge
-module load cuda/11.8
+module load cuda-11.8
 
 source /seu_share/home/fenglei/213243847/miniconda3/etc/profile.d/conda.sh
 conda activate torl
