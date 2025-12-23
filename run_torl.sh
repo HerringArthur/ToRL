@@ -2,12 +2,15 @@
 #SBATCH --job-name=torl_qwen_1.5b
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 
-module load cuda/
+module purge
+module load cuda/11.8
+
 source /seu_share/home/fenglei/213243847/miniconda3/etc/profile.d/conda.sh
 conda activate torl
 
@@ -19,8 +22,6 @@ cd /seu_share2/home/fenglei/213243847/ToRL
 
 # 1. 环境设置
 # ----------------------------------------------------------------
-# 指定使用的 GPU 编号 (例如 "0" 或 "0,1")
-export CUDA_VISIBLE_DEVICES=0
 
 # 设置 Tokenizers 并行度，防止死锁警告
 export TOKENIZERS_PARALLELISM=false
@@ -58,6 +59,7 @@ LORA_R=16
 
 # 4. 启动训练命令
 # ----------------------------------------------------------------
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "Starting TORL training..."
 echo "Model: $MODEL_PATH"
 echo "Output Dir: $OUTPUT_DIR"
