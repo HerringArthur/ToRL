@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
 
-
+module load cuda/
 source /seu_share/home/fenglei/213243847/miniconda3/etc/profile.d/conda.sh
 conda activate torl
 
