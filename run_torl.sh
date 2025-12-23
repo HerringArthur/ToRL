@@ -1,4 +1,17 @@
 #!/bin/bash
+#SBATCH --job-name=torl_qwen_1.5b
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:1
+
+
+source /seu_share/home/fenglei/213243847/miniconda3/etc/profile.d/conda.sh
+conda activate torl
+
+cd /seu_share2/home/fenglei/213243847/ToRL
 
 # ================================================================
 # TORL (Tool-Integrated Reinforcement Learning) 训练启动脚本
