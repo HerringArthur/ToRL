@@ -17,7 +17,7 @@ class TORLConfig:
     device: str = "cuda"
     
     # 数据配置
-    dataset_path: str = "/seu_share2/home/fenglei/213243847/data/grpo-aco/data/rl_dataset_llm_v2.json"
+    dataset_path: str = "/seu_share2/home/fenglei/213243847/data/grpo-aco/grpo-aco/data/rl_dataset_llm_v2.json"
     batch_size: int = 1  # 目前固定为1
     max_seq_length: int = 2048
     
