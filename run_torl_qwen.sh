@@ -29,10 +29,10 @@ conda activate torl
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
-# 进入代码目录 (使用 SLURM_SUBMIT_DIR 确保在 Slurm 环境下能找到正确路径)
-# 如果不是 Slurm 环境，默认使用当前目录
-PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
-cd "${PROJECT_ROOT}/code" || { echo "Error: Code directory not found at ${PROJECT_ROOT}/code"; exit 1; }
+# 进入代码目录 (用户指定路径)
+# 注意：train_torl.py 位于此目录下
+PROJECT_ROOT="/seu_share2/home/fenglei/213243847/ToRL"
+cd "${PROJECT_ROOT}" || { echo "Error: Directory not found at ${PROJECT_ROOT}"; exit 1; }
 
 # 2. 路径配置
 # ----------------------------------------------------------------
@@ -41,7 +41,7 @@ cd "${PROJECT_ROOT}/code" || { echo "Error: Code directory not found at ${PROJEC
 MODEL_PATH="/seu_share2/home/fenglei/sharedata/Qwen2.5-1.5B-Instruct"
 
 # 数据集路径
-DATA_PATH="/seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco/data/rl_dataset_llm_v2.json"
+DATA_PATH="${PROJECT_ROOT}/data/rl_dataset_llm_v2.json"
 
 # 输出保存路径
 OUTPUT_DIR="../output/checkpoints_verl_v1"
