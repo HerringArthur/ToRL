@@ -18,7 +18,7 @@ module load cuda-11.8
 source /seu_share/home/fenglei/213243847/miniconda3/etc/profile.d/conda.sh
 conda activate torl
 
-cd /seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco
+cd /seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco/code
 
 # ================================================================
 # TORL (Tool-Integrated Reinforcement Learning) 训练启动脚本
@@ -29,6 +29,7 @@ cd /seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco
 
 # 设置 Tokenizers 并行度，防止死锁警告
 export TOKENIZERS_PARALLELISM=false
+export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
 # 2. 路径配置
 # ----------------------------------------------------------------
@@ -37,10 +38,10 @@ export TOKENIZERS_PARALLELISM=false
 MODEL_PATH="/seu_share2/home/fenglei/sharedata/Qwen2.5-1.5B-Instruct"
 
 # 数据集路径
-DATA_PATH="/seu_share2/home/fenglei/213243847/data/grpo-aco/data/rl_dataset_llm_v2.json"
+DATA_PATH="/seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco/data/rl_dataset_llm_v2.json"
 
 # 输出保存路径
-OUTPUT_DIR="./output/checkpoints_verl_v1"
+OUTPUT_DIR="../output/checkpoints_verl_v1"
 
 # 3. 核心超参数配置 (根据显存大小调整)
 # ----------------------------------------------------------------
