@@ -29,7 +29,7 @@ cd /seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco/code
 
 # 设置 Tokenizers 并行度，防止死锁警告
 export TOKENIZERS_PARALLELISM=false
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
 
 # 2. 路径配置
 # ----------------------------------------------------------------
