@@ -612,24 +612,18 @@ class TORLTrainer:
         self.stop_strings = ["Observation:", "\nUser:", "<|im_end|>"]
 
     def parse_action(self, text):
-        """
-        解析模型输出。
-        假设模型输出格式灵活，这里做简单的关键字匹配。
-        """
-        try:
-            # 寻找最后一个 "Tool:"
-            if "Tool:" in text:
-                # 取最后一次调用的内容
-                segment = text.split("Tool:")[-1]
-                parts = segment.split("Args:")
-                tool_name = parts[0].strip()
-                tool_args = parts[1].strip() if len(parts) > 1 else "{}"
-                # 去除可能的额外文本
-                tool_args = tool_args.split("\n")[0]
-                return tool_name, tool_args
-            return None, None
-        except:
-            return None, None
+        import re
+        # 使用正则提取，更鲁棒
+        # 匹配 Tool: ... (换行) Args: ...
+        # re.DOTALL 允许匹配跨行
+        pattern = r"Tool:\s*(.+?)\s*Args:\s*(.+)"
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        
+        if match:
+            tool_name = match.group(1).strip()
+            tool_args = match.group(2).strip()
+            return tool_name, tool_args
+        return None, None
 
     def run_rollout(self, prompt, ground_truth):
         self.env.reset({"ground_truth": ground_truth})
