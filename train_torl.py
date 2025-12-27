@@ -632,67 +632,87 @@ class TORLTrainer:
             return None, None
 
     def run_rollout(self, prompt, ground_truth):
-        """
-        单次轨迹采样 (Inference Mode)。
-        """
         self.env.reset({"ground_truth": ground_truth})
         
-        # 构造初始对话历史
-        # 格式: User: ... \nAssistant:
-        full_text_log = f"User: {prompt}\n"
+        # --- [修改 1] 定义 System Prompt 强制格式 ---
+        system_prompt = (
+            "You are a helpful assistant acting as an agent. "
+            "To take action, you MUST use the following format exactly:\n"
+            "Tool: <tool_name>\n"
+            "Args: <json_args_or_string>\n\n"
+            "Example:\n"
+            "Tool: search_train_ticket\n"
+            "Args: {\"from\": \"Beijing\", \"to\": \"Shanghai\"}\n\n"
+            "If you are done or cannot proceed, generate a plan file or stop."
+        )
+
+        # --- [修改 2] 使用 apply_chat_template ---
+        # 维护一个 messages 列表，符合 Qwen 的微调格式
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ]
         
         total_reward = 0
         done = False
         step = 0
         success = False
         
+        # 用于记录完整的文本日志供 Loss 计算
+        # 注意：Qwen 的 template 会添加特殊 token，这里我们在 rollout 中主要维护 messages
+        
         while not done and step < self.cfg.max_steps_per_episode:
-            # 拼接 Prompt
-            input_text = full_text_log + "Assistant:"
+            # 将当前对话历史转为 tensor
+            text_input = self.tokenizer.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True
+            )
             
-            inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
+            inputs = self.tokenizer(text_input, return_tensors="pt").to(self.device)
             
-            # 模型生成
             with torch.no_grad():
                 outputs = self.policy.generate(
                     inputs.input_ids,
                     attention_mask=inputs.attention_mask,
-                    tokenizer=self.tokenizer,
                     stop_strings=self.stop_strings,
-                    # GRPO 必须开启采样以获得多样性
                     do_sample=True 
                 )
             
-            # 提取新生成的文本
+            # 只提取新生成的部分
             generated_ids = outputs[0][inputs.input_ids.shape[1]:]
             generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
             
-            # 更新日志
-            full_text_log += f"Assistant: {generated_text}\n"
+            # 调试打印：看看模型到底生成了什么？
+            # print(f"DEBUG STEP {step}: {generated_text}") 
+
+            # 更新对话历史 (这一点对多轮对话至关重要)
+            messages.append({"role": "assistant", "content": generated_text})
             
-            # 执行动作
+            # 解析动作
             tool_name, tool_args = self.parse_action(generated_text)
             
             if tool_name:
                 obs, reward, done, info = self.env.step(tool_name, tool_args)
-                full_text_log += f"Observation: {obs}\n"
+                # 将观察结果放回 Prompt
+                messages.append({"role": "user", "content": f"Observation: {obs}"})
                 total_reward += reward
             else:
-                # 检查是否完成任务 (生成了最终文件)
+                # 依然格式错误时的处理
                 if "train-ticket-plan.json" in generated_text:
-                    if self.env.check_success():
-                        total_reward += self.cfg.reward_success_weight
-                        success = True
-                    done = True
+                     # ... (原有逻辑)
+                     pass
                 else:
-                    # 格式错误或无意义输出
-                    total_reward -= 0.5
-                    done = True # 也可以选择不 done，让它重试，这里简化为结束
+                    # 如果格式错了，给负反馈并结束，或者尝试让它重试（这里先结束）
+                    total_reward -= 0.5 
+                    done = True
             
             step += 1
 
+        # 为了计算 GRPO Loss，我们需要拼接后的完整文本（或者在 Loss 计算时重新 apply template）
+        # 简单起见，这里返回 messages 结构，在 compute_loss 里处理
         return {
-            "full_text": full_text_log,
+            "messages": messages, # 返回结构化数据
             "final_reward": total_reward,
             "success": success
         }
