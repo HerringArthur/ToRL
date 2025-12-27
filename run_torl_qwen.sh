@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --time=196:00:00
 #SBATCH --partition=fengl2
 
@@ -18,7 +18,7 @@ module load cuda-11.8
 source /seu_share/home/fenglei/213243847/miniconda3/etc/profile.d/conda.sh
 conda activate torl
 
-cd /seu_share2/home/fenglei/213243847/ToRL
+cd /seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco
 
 # ================================================================
 # TORL (Tool-Integrated Reinforcement Learning) 训练启动脚本
@@ -64,7 +64,7 @@ LORA_R=16
 # 4. 启动训练命令
 # ----------------------------------------------------------------
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-echo "Starting TORL training..."
+echo "Starting TORL training with Accelerate (Multi-GPU)..."
 echo "Model: $MODEL_PATH"
 echo "Output Dir: $OUTPUT_DIR"
 echo "Group Size: $GROUP_SIZE"
@@ -72,8 +72,11 @@ echo "Group Size: $GROUP_SIZE"
 # 确保输出目录存在
 mkdir -p "$OUTPUT_DIR"
 
-# 记录日志到 train.log
-python train_torl.py \
+# 使用 accelerate launch 启动多卡训练
+# --multi_gpu: 启用多卡
+# --num_processes 2: 使用 2 张卡
+# --mixed_precision fp16: 混合精度
+accelerate launch --multi_gpu --num_processes 2 --mixed_precision fp16 train_torl.py \
     --model_path "$MODEL_PATH" \
     --data_path "$DATA_PATH" \
     --output_dir "$OUTPUT_DIR" \
