@@ -608,21 +608,60 @@ class TORLTrainer:
         self.optimizer = AdamW(self.policy.parameters(), lr=cfg.learning_rate)
         self.global_step = 0
         
-        # 停止符 (用于生成中断)
-        self.stop_strings = ["Observation:", "\nUser:", "<|im_end|>"]
-
-    def parse_action(self, text):
-        import re
-        # 使用正则提取，更鲁棒
-        # 匹配 Tool: ... (换行) Args: ...
-        # re.DOTALL 允许匹配跨行
-        pattern = r"Tool:\s*(.+?)\s*Args:\s*(.+)"
-        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        # 添加日志记录
+        import logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
         
-        if match:
-            tool_name = match.group(1).strip()
-            tool_args = match.group(2).strip()
-            return tool_name, tool_args
+        # 停止符 (用于生成中断) - 使用transformers的StoppingCriteria
+        from transformers import StoppingCriteria, StoppingCriteriaList
+        
+        class CustomStoppingCriteria(StoppingCriteria):
+            def __init__(self, stop_strings, tokenizer):
+                self.stop_strings = stop_strings
+                self.tokenizer = tokenizer
+                
+            def __call__(self, input_ids, scores, **kwargs):
+                # 检查生成的文本是否包含停止符
+                generated_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                return any(stop_str in generated_text for stop_str in self.stop_strings)
+        
+        self.stopping_criteria = StoppingCriteriaList([
+            CustomStoppingCriteria(["Observation:", "\nUser:", ""], self.tokenizer)
+        ])
+
+    def parse_action(self, text: str):
+        """从模型输出中提取工具调用 - 增强版"""
+        import re
+        text = text.strip()
+        patterns = [
+            # 标准格式: "Tool: tool_name\nArgs: {...}"
+            r"Tool:\s*(.+?)\s*Args:\s*(.+)",
+            # 单行格式: "tool_name(args)"
+            r"(\w+)\s*\((.*?)\)",
+            # Markdown: "`tool_name(args)`"
+            r"`(\w+)\s*\((.*?)\)`",
+            # JSON: '{"tool":"name","args":"..."}'
+            r'\{\s*"tool"\s*:\s*"(\w+)"\s*,\s*"args"\s*:\s*"(.*?)"\s*\}',
+            # 简化: "tool: args"
+            r"(\w+)\s*:\s*(.*)",
+        ]
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
+            if matches:
+                tool_name, args_str = matches[-1]
+                tool_name, args_str = tool_name.strip(), args_str.strip()
+                # 验证工具名称是否有效
+                if tool_name and tool_name in self.cfg.TOOLS_LIST:
+                    return tool_name, args_str
+        # 退而求其次：在文本中找已知工具名
+        words = re.findall(r'\b(\w+)\b', text.lower())
+        for word in words:
+            for tool in self.cfg.TOOLS_LIST:
+                if word == tool.lower():
+                    remaining = text[text.lower().find(word) + len(word):].strip()
+                    remaining = re.sub(r"^[\(\):\s]+", "", remaining)
+                    return tool, remaining
         return None, None
 
     def run_rollout(self, prompt, ground_truth):
@@ -669,8 +708,13 @@ class TORLTrainer:
                 outputs = self.policy.generate(
                     inputs.input_ids,
                     attention_mask=inputs.attention_mask,
-                    stop_strings=self.stop_strings,
-                    do_sample=True 
+                    stopping_criteria=self.stopping_criteria,
+                    do_sample=True,
+                    max_new_tokens=self.cfg.max_new_tokens,
+                    temperature=self.cfg.temperature,
+                    top_k=self.cfg.top_k,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id
                 )
             
             # 只提取新生成的部分
@@ -692,33 +736,40 @@ class TORLTrainer:
                 messages.append({"role": "user", "content": f"Observation: {obs}"})
                 total_reward += reward
             else:
-                # 依然格式错误时的处理
-                if "train-ticket-plan.json" in generated_text:
-                     # ... (原有逻辑)
-                     pass
-                else:
-                    # 如果格式错了，给负反馈并结束，或者尝试让它重试（这里先结束）
-                    total_reward -= 0.5 
-                    done = True
+                 # 如果生成了计划文件，认为任务完成
+                 if "train-ticket-plan.json" in generated_text:
+                     total_reward += 1.0
+                     done = True
+                     success = True
+                 else:
+                     # 如果格式错了，给负反馈并结束，或者尝试让它重试（这里先结束）
+                     total_reward -= 0.5 
+                     done = True
             
             step += 1
 
+        # 检查是否成功完成任务
+        success = self.env.check_success()
+
         # 为了计算 GRPO Loss，我们需要拼接后的完整文本（或者在 Loss 计算时重新 apply template）
         # 简单起见，这里返回 messages 结构，在 compute_loss 里处理
+        # 同时返回完整文本用于长度统计
+        full_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
         return {
             "messages": messages, # 返回结构化数据
             "final_reward": total_reward,
-            "success": success
+            "success": success,
+            "full_text": full_text
         }
 
     def compute_grpo_loss(self, trajectories):
         """
-        计算 GRPO Loss。
+        计算 GRPO Loss - 增强版。
         关键点：只对 Assistant 生成的 Action 部分计算 Loss，Mask 掉其他部分。
         """
         rewards = torch.tensor([t['final_reward'] for t in trajectories], device=self.device)
         
-        # --- [修改 3] 防止 Std 为 0 导致的除零或无效计算 ---
+        # 防止 Std 为 0 导致的除零或无效计算
         if len(rewards) > 1:
             mean_reward = rewards.mean()
             std_reward = rewards.std()
@@ -728,7 +779,7 @@ class TORLTrainer:
             else:
                 advantages = (rewards - mean_reward) / (std_reward + 1e-8)
         else:
-            advantages = torch.zeros_like(rewards) # 单样本无法计算相对优势
+            advantages = torch.zeros_like(rewards)  # 单样本无法计算相对优势
 
         total_loss = 0
         valid_trajs = 0
@@ -750,28 +801,52 @@ class TORLTrainer:
             
             labels = input_ids.clone()
             
-            # --- [修改 4] Masking 逻辑 (简化版) ---
-            # 这是一个难点。如果不 Mask User Prompt，模型会“背诵”Prompt。
-            # 这里如果不方便根据 Role Mask，至少要 Mask 掉 System Prompt。
-            # 对于 GRPO，最简单的 Mask 是：只计算 Assistant 回复部分的 Loss。
-            # 为了代码简洁，这里暂时全量计算，但建议后续实现 DataCollator 来处理 Role Masking。
-            # 或者：利用 tokenizer 的 chat template 只有 assistant 部分才由 loss 贡献
+            # 增强 Masking 逻辑：只保留 Assistant 回复部分的 Loss
+            # 找到所有 assistant 回复的起止位置
+            assistant_start_token = self.tokenizer.convert_tokens_to_ids("assistant")
+            assistant_end_token = self.tokenizer.convert_tokens_to_ids("user") if "user" in self.tokenizer.get_vocab() else self.tokenizer.eos_token_id
+            
+            mask = torch.zeros_like(input_ids, dtype=torch.bool)
+            in_assistant = False
+            
+            for pos in range(input_ids.size(1)):
+                token_id = input_ids[0, pos].item()
+                if token_id == assistant_start_token:
+                    in_assistant = True
+                elif token_id == assistant_end_token and in_assistant:
+                    in_assistant = False
+                
+                if in_assistant:
+                    mask[0, pos] = True
+            
+            # 如果没有找到 assistant 部分，则使用全量计算（降级处理）
+            if not mask.any():
+                mask = torch.ones_like(input_ids, dtype=torch.bool)
+            
+            # 应用 mask 到 labels：非 assistant 部分设为 -100（忽略索引）
+            labels[~mask] = -100
             
             outputs = self.policy.model(
                 input_ids=input_ids,
                 labels=labels
             )
             
+            # 获取负对数似然损失
+            policy_loss = outputs.loss
+            
             # GRPO Loss: - Advantage * log_pi
             # 因为 policy_loss = - log_pi (NLL), 所以:
             # Loss = policy_loss * (-adv)
             # 当 Adv > 0, 我们希望 minimizing NLL (maximize log prob) -> loss 变负
-            loss = policy_loss * (-adv)
+            loss = policy_loss * (-advantages[idx])
             
             total_loss += loss
             valid_trajs += 1
 
-        return total_loss / max(1, valid_trajs)
+        if valid_trajs == 0:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        return total_loss / valid_trajs
 
     def train(self):
         print(f"\n[Trainer] Starting GRPO Training")
@@ -781,65 +856,177 @@ class TORLTrainer:
         print("========================================\n")
         
         self.policy.train()
+        consecutive_failures = 0  # 连续失败计数器
         
         for epoch in range(self.cfg.num_epochs):
             pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}")
             
             for batch_idx, batch_data in enumerate(pbar):
-                # 提取数据 (Batch Size = 1)
-                prompt = batch_data['prompt'][0]
-                # 处理 dataset 返回的 dict list 格式
-                ground_truth = {
-                    k: v[0] if isinstance(v, list) else v 
-                    for k, v in batch_data['ground_truth'].items()
-                }
-                
-                # --- 1. Rollout Phase (采样) ---
-                trajectories = []
-                success_count = 0
-                avg_len = 0
-                
-                # 采样 G 条轨迹
-                for _ in range(self.cfg.group_size):
-                    traj = self.run_rollout(prompt, ground_truth)
-                    trajectories.append(traj)
-                    if traj['success']:
-                        success_count += 1
-                    avg_len += len(traj['full_text'])
-                
-                # --- 2. Training Phase (更新) ---
-                self.optimizer.zero_grad()
-                
-                loss = self.compute_grpo_loss(trajectories)
-                loss.backward()
-                
-                # 梯度裁剪
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
-                
-                self.optimizer.step()
-                self.global_step += 1
-                
-                # --- 3. 记录与保存 ---
-                avg_reward = sum(t['final_reward'] for t in trajectories) / len(trajectories)
-                avg_len /= len(trajectories)
-                
-                pbar.set_postfix({
-                    "Loss": f"{loss.item():.4f}", 
-                    "Rw": f"{avg_reward:.2f}",
-                    "Succ": f"{success_count}/{self.cfg.group_size}",
-                    "Len": f"{int(avg_len)}"
-                })
-                
-                if self.global_step % self.cfg.save_every == 0:
-                    self.save_checkpoint(f"step_{self.global_step}")
+                try:
+                    # 提取数据 (Batch Size = 1)
+                    prompt = batch_data['prompt'][0]
+                    # 处理 dataset 返回的 dict list 格式
+                    ground_truth = {
+                        k: v[0] if isinstance(v, list) else v 
+                        for k, v in batch_data['ground_truth'].items()
+                    }
+                    
+                    # --- 1. Rollout Phase (采样) ---
+                    trajectories = []
+                    success_count = 0
+                    avg_len = 0
+                    
+                    # 采样 G 条轨迹
+                    for _ in range(self.cfg.group_size):
+                        traj = self.run_rollout(prompt, ground_truth)
+                        trajectories.append(traj)
+                        if traj['success']:
+                            success_count += 1
+                        avg_len += len(traj['full_text'])
+                    
+                    # --- 2. Training Phase (更新) ---
+                    self.optimizer.zero_grad()
+                    
+                    loss = self.compute_grpo_loss(trajectories)
+                    loss.backward()
+                    
+                    # 梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+                    
+                    self.optimizer.step()
+                    self.global_step += 1
+                    
+                    # 重置连续失败计数器
+                    consecutive_failures = 0
+                    
+                    # --- 3. 记录与保存 ---
+                    avg_reward = sum(t['final_reward'] for t in trajectories) / len(trajectories)
+                    avg_len /= len(trajectories)
+                    
+                    # 详细日志记录
+                    self.logger.info(f"Step {self.global_step}: Loss={loss.item():.4f}, "
+                                     f"Avg Reward={avg_reward:.2f}, "
+                                     f"Success Rate={success_count}/{self.cfg.group_size}={success_count/self.cfg.group_size:.2f}, "
+                                     f"Avg Length={int(avg_len)}")
+                    
+                    # 如果成功率为0，记录警告
+                    if success_count == 0 and self.global_step > 10:
+                        consecutive_failures += 1
+                        self.logger.warning(f"Zero success rate detected at step {self.global_step}. "
+                                           f"Consecutive failures: {consecutive_failures}")
+                        
+                        # 如果连续失败太多，调整学习率或采取其他措施
+                        if consecutive_failures >= 5:
+                            self.logger.error(f"Too many consecutive failures ({consecutive_failures}). "
+                                             f"Consider reducing learning rate or checking reward function.")
+                            # 可以在这里添加学习率调整逻辑
+                            for param_group in self.optimizer.param_groups:
+                                param_group['lr'] *= 0.5
+                            self.logger.info("Learning rate reduced by 50%")
+                    
+                    pbar.set_postfix({
+                        "Loss": f"{loss.item():.4f}", 
+                        "Rw": f"{avg_reward:.2f}",
+                        "Succ": f"{success_count}/{self.cfg.group_size}",
+                        "Len": f"{int(avg_len)}"
+                    })
+                    
+                    # 内存优化：定期清理缓存
+                    if self.global_step % 100 == 0:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        import gc
+                        gc.collect()
+                    
+                    if self.global_step % self.cfg.save_every == 0:
+                        self.save_checkpoint(f"step_{self.global_step}")
+                        
+                except Exception as e:
+                    self.logger.error(f"Error at step {self.global_step}: {str(e)}")
+                    consecutive_failures += 1
+                    
+                    # 如果错误太频繁，保存当前状态并退出
+                    if consecutive_failures >= 10:
+                        self.logger.error("Too many consecutive errors. Saving checkpoint and exiting.")
+                        self.save_checkpoint(f"error_step_{self.global_step}")
+                        raise
+                    
+                    # 否则继续训练
+                    continue
         
         # 训练结束保存最终模型
         self.save_checkpoint("final_model")
 
     def save_checkpoint(self, name):
+        """保存模型检查点 - 增强版"""
         save_path = self.cfg.output_dir / name
-        self.policy.save_pretrained(save_path)
-        print(f"\n[Trainer] Checkpoint saved: {save_path}")
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # 保存模型和分词器
+            self.policy.save_pretrained(save_path)
+            self.tokenizer.save_pretrained(save_path)
+            
+            # 保存优化器状态和其他训练状态
+            training_state = {
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'global_step': self.global_step,
+                'learning_rate': self.optimizer.param_groups[0]['lr'],
+                'model_config': self.cfg.__dict__,
+                'timestamp': torch.datetime.now().isoformat() if hasattr(torch, 'datetime') else None
+            }
+            
+            torch.save(training_state, save_path / "training_state.pt")
+            
+            # 保存元数据文件
+            metadata = {
+                'name': name,
+                'global_step': self.global_step,
+                'model_name': self.cfg.model_path,
+                'success_rate': getattr(self, 'last_success_rate', 0.0),
+                'avg_reward': getattr(self, 'last_avg_reward', 0.0)
+            }
+            
+            import json
+            with open(save_path / "metadata.json", 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            self.logger.info(f"Checkpoint saved successfully: {save_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save checkpoint {name}: {str(e)}")
+            # 尝试清理不完整的检查点
+            try:
+                import shutil
+                if save_path.exists():
+                    shutil.rmtree(save_path)
+            except:
+                pass
+            raise
+    
+    def load_checkpoint(self, checkpoint_path: str):
+        """从检查点加载模型和训练状态"""
+        try:
+            # 加载模型和分词器
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            self.policy.model = AutoModelForCausalLM.from_pretrained(checkpoint_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+            
+            # 加载训练状态
+            training_state_path = Path(checkpoint_path) / "training_state.pt"
+            if training_state_path.exists():
+                training_state = torch.load(training_state_path, map_location=self.device)
+                self.optimizer.load_state_dict(training_state['optimizer_state_dict'])
+                self.global_step = training_state.get('global_step', 0)
+                
+                self.logger.info(f"Checkpoint loaded successfully from {checkpoint_path}")
+                self.logger.info(f"Resumed from step {self.global_step}")
+            else:
+                self.logger.warning(f"Training state not found at {checkpoint_path}, loading model only")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to load checkpoint {checkpoint_path}: {str(e)}")
+            raise
 
 # ============================================================================
 # 3. 主程序入口

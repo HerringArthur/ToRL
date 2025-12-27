@@ -1,4 +1,5 @@
 import json
+import re
 import difflib
 from typing import Dict, Any, Tuple, Optional
 
@@ -107,14 +108,23 @@ class TrainTicketMockEnv:
         # 2. 验证工具名称 (Tool Name Matching)
         # 移除可能的空白字符
         action_name = action_name.strip()
+        
+        # 增加容错性：检查是否是相似的工具名称
         if action_name != expected_tool:
-            # 工具选错了
-            # 策略：立即报错，给予负反馈
-            observation = f"Error: Expected tool '{expected_tool}', but got '{action_name}'. Check your plan."
-            reward = -1.0 
-            # 这里的 done=False 允许模型在同一轮次中（如果实现了 retry）或者在后续训练中修正
-            # 但在简单的 GRPO rollout 中，一步错通常意味着这条轨迹废了
-            return observation, reward, False, {"status": "wrong_tool", "expected": expected_tool}
+            # 使用模糊匹配检查相似度
+            similarity = difflib.SequenceMatcher(None, action_name, expected_tool).ratio()
+            
+            if similarity >= 0.8:  # 相似度阈值
+                # 工具名称相似但略有不同，给予较小的惩罚
+                observation = f"Warning: Tool name slightly different. Expected '{expected_tool}', got '{action_name}'. Continuing with correction."
+                reward = -0.2  # 较小的惩罚
+                # 继续执行，使用正确的工具名称
+                action_name = expected_tool
+            else:
+                # 工具完全错误
+                observation = f"Error: Expected tool '{expected_tool}', but got '{action_name}'. Check your plan."
+                reward = -1.0 
+                return observation, reward, False, {"status": "wrong_tool", "expected": expected_tool}
 
         # 3. 验证参数 (Argument Matching)
         norm_pred_args = self._normalize_args(action_args)
@@ -124,12 +134,14 @@ class TrainTicketMockEnv:
         if norm_pred_args == norm_gold_args:
             # HIT! 
             observation = self._parse_observation(expected_output_raw)
-            reward = 0.5 # 单步正确的奖励 (不需要太高，最终奖励才是重点)
+            reward = 1.0 # 增加单步正确奖励，提高学习信号
             self.step_idx += 1 
             
             # 检查是否是最后一步
             if self.step_idx >= len(self.gold_tools):
                 self.done = True
+                # 如果是最后一步且成功完成，给予额外奖励
+                reward += 2.0
             
             return observation, reward, self.done, {"status": "success"}
         
@@ -138,7 +150,7 @@ class TrainTicketMockEnv:
             # 这是一个关键点：我们无法真正执行错误的参数。
             # 为了辅助训练，我们返回一个通用的参数错误提示。
             observation = f"Error: Arguments mismatch for tool {action_name}. Please verify the arguments format and values."
-            reward = -0.5 
+            reward = -1.0 # 增加参数错误的惩罚
             return observation, reward, False, {"status": "wrong_args"}
 
     def check_success(self) -> bool:
