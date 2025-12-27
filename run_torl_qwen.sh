@@ -18,8 +18,6 @@ module load cuda-11.8
 source /seu_share/home/fenglei/213243847/miniconda3/etc/profile.d/conda.sh
 conda activate torl
 
-cd /seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco/code
-
 # ================================================================
 # TORL (Tool-Integrated Reinforcement Learning) 训练启动脚本
 # ================================================================
@@ -30,6 +28,11 @@ cd /seu_share2/home/fenglei/213243847/grpo-aco/grpo-aco/code
 # 设置 Tokenizers 并行度，防止死锁警告
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="${PYTHONPATH:-}:$(pwd)"
+
+# 进入代码目录 (使用 SLURM_SUBMIT_DIR 确保在 Slurm 环境下能找到正确路径)
+# 如果不是 Slurm 环境，默认使用当前目录
+PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
+cd "${PROJECT_ROOT}/code" || { echo "Error: Code directory not found at ${PROJECT_ROOT}/code"; exit 1; }
 
 # 2. 路径配置
 # ----------------------------------------------------------------
