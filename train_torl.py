@@ -722,69 +722,51 @@ class TORLTrainer:
         计算 GRPO Loss。
         关键点：只对 Assistant 生成的 Action 部分计算 Loss，Mask 掉其他部分。
         """
-        # 1. 计算优势 (Advantage)
         rewards = torch.tensor([t['final_reward'] for t in trajectories], device=self.device)
-        # 组内标准化 (Group Standardization)
+        
+        # --- [修改 3] 防止 Std 为 0 导致的除零或无效计算 ---
         if len(rewards) > 1:
             mean_reward = rewards.mean()
-            std_reward = rewards.std() + 1e-8
-            advantages = (rewards - mean_reward) / std_reward
+            std_reward = rewards.std()
+            # 如果方差极小（例如所有奖励都一样），则 advantage 设为 0
+            if std_reward.item() < 1e-6:
+                advantages = torch.zeros_like(rewards)
+            else:
+                advantages = (rewards - mean_reward) / (std_reward + 1e-8)
         else:
-            advantages = rewards # 如果 group_size=1，无法归一化
+            advantages = torch.zeros_like(rewards) # 单样本无法计算相对优势
 
         total_loss = 0
         valid_trajs = 0
 
-        # 2. 逐条轨迹计算 Loss
         for idx, traj in enumerate(trajectories):
-            text = traj['full_text']
-            adv = advantages[idx]
-            
-            # Tokenize 完整文本
-            inputs = self.tokenizer(
-                text, 
-                return_tensors="pt", 
-                truncation=True, 
-                max_length=2048
+            # 如果 advantage 是 0，算 Loss 也没意义，只会浪费计算资源，直接跳过
+            if advantages[idx] == 0:
+                continue
+
+            # 重新构建 Full Text (因为我们需要 Mask 掉 User 部分)
+            # 使用 apply_chat_template 生成完整 ids
+            messages = traj['messages']
+            input_ids = self.tokenizer.apply_chat_template(
+                messages, 
+                tokenize=True, 
+                return_tensors="pt",
+                add_generation_prompt=False
             ).to(self.device)
             
-            input_ids = inputs.input_ids
-            attention_mask = inputs.attention_mask
-            
-            # --- 构建 Mask (Labels) ---
-            # 我们只需要计算 Assistant 回复部分的 Loss
-            # 策略：将 User Prompt 和 Observation 部分的 label 设为 -100 (Ignored)
             labels = input_ids.clone()
             
-            # 简单 Mask 逻辑：
-            # 1. 找到所有 "Assistant:" 的位置作为起点
-            # 2. 找到所有 "Observation:" 或 "User:" 的位置作为终点
-            # 注意：这是基于文本的启发式 Mask，生产环境建议在 Token ID 层面做更精细的对齐
+            # --- [修改 4] Masking 逻辑 (简化版) ---
+            # 这是一个难点。如果不 Mask User Prompt，模型会“背诵”Prompt。
+            # 这里如果不方便根据 Role Mask，至少要 Mask 掉 System Prompt。
+            # 对于 GRPO，最简单的 Mask 是：只计算 Assistant 回复部分的 Loss。
+            # 为了代码简洁，这里暂时全量计算，但建议后续实现 DataCollator 来处理 Role Masking。
+            # 或者：利用 tokenizer 的 chat template 只有 assistant 部分才由 loss 贡献
             
-            # 简单全量 Mask 方法 (Baseline):
-            # 将 user prompt 之前的部分 mask 掉。
-            # 这里为了代码稳健性，采用简化的 Training：全序列训练，但依赖 Advantage 加权
-            # 更佳实践是实现 ChatML 格式的 DataCollator，这里手动模拟一下
-            
-            # (简易版：不 Mask User Prompt，假设模型能学会 Copy。
-            #  如果需要严格 Mask，需要在该 Loop 里 decode 每一段并查找 index)
-            
-            # Forward Pass
             outputs = self.policy.model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels # HF model 内部计算 CE Loss
+                labels=labels
             )
-            
-            # 提取 Logits 手动计算 Loss 以便加权
-            logits = outputs.logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            
-            loss_fct = nn.CrossEntropyLoss(reduction='none')
-            token_losses = loss_fct(logits.view(-1, logits.size(-1)), shift_labels.view(-1))
-            
-            # 平均 Token Loss
-            policy_loss = token_losses.mean()
             
             # GRPO Loss: - Advantage * log_pi
             # 因为 policy_loss = - log_pi (NLL), 所以:
